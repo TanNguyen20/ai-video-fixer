@@ -11,6 +11,13 @@ def cleanup(path: Path):
     if path.exists():
         shutil.rmtree(path)
 
+@app.get("/client-ip")
+async def get_client_ip(request: Request):
+    client_ip = request.client.host
+    return {
+        "ip": client_ip
+    }
+
 @app.post("/repair")
 async def repair_video(
     background_tasks: BackgroundTasks,
