@@ -1,31 +1,45 @@
 import subprocess
 import shutil
+import uuid
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
 app = FastAPI()
-WORK_DIR = Path("/tmp/untrunc_work")
-WORK_DIR.mkdir(exist_ok=True)
 
-def cleanup_dir():
-    for item in WORK_DIR.iterdir():
-        if item.is_file(): item.unlink()
+def cleanup(path: Path):
+    if path.exists():
+        shutil.rmtree(path)
 
 @app.post("/repair")
-async def repair(bg: BackgroundTasks, healthy: UploadFile = File(...), broken: UploadFile = File(...)):
-    cleanup_dir()
+async def repair_video(
+    background_tasks: BackgroundTasks,
+    healthy: UploadFile = File(...),
+    broken: UploadFile = File(...)
+):
+    job_id = str(uuid.uuid4())
+    work_dir = Path(f"/tmp/{job_id}")
+    work_dir.mkdir(parents=True, exist_ok=True)
     
-    h_path, b_path = WORK_DIR / "h.mp4", WORK_DIR / "b.mp4"
-    with h_path.open("wb") as f: f.write(await healthy.read())
-    with b_path.open("wb") as f: f.write(await broken.read())
+    h_path = work_dir / "healthy.mp4"
+    b_path = work_dir / "broken.mp4"
+    
+    with h_path.open("wb") as f:
+        shutil.copyfileobj(healthy.file, f)
+    with b_path.open("wb") as f:
+        shutil.copyfileobj(broken.file, f)
+        
+    process = subprocess.run(
+        ["untrunc", "healthy.mp4", "broken.mp4"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True
+    )
+    
+    fixed_files = list(work_dir.glob("*_fixed*"))
+    if not fixed_files:
+        cleanup(work_dir)
+        raise HTTPException(status_code=500, detail=f"Repair failed: {process.stderr}")
 
-    subprocess.run(["untrunc", "h.mp4", "b.mp4"], cwd=WORK_DIR)
-    
-    try:
-        fixed_file = next(WORK_DIR.glob("*_fixed*"))
-        bg.add_task(cleanup_dir)
-        return FileResponse(fixed_file)
-    except StopIteration:
-        cleanup_dir()
-        return {"error": "Repair failed"}
+    background_tasks.add_task(cleanup, work_dir)
+    return FileResponse(fixed_files[0], filename=f"fixed_{broken.filename}")
