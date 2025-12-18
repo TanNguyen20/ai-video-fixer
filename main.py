@@ -1,35 +1,45 @@
 import subprocess
-import os
 import shutil
-from fastapi import FastAPI, UploadFile, File
+import uuid
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
 app = FastAPI()
 
-@app.post("/repair")
-async def repair_video(working: UploadFile = File(...), broken: UploadFile = File(...)):
-    # Save uploaded files temporarily
-    with open("working.mp4", "wb") as w, open("broken.mp4", "wb") as b:
-        shutil.copyfileobj(working.file, w)
-        shutil.copyfileobj(broken.file, b)
+def cleanup(path: Path):
+    if path.exists():
+        shutil.rmtree(path)
 
-    # Run untrunc command
-    # Usage: untrunc [options] <working_file> <broken_file>
-    try:
-        result = subprocess.run(
-            ["untrunc", "working.mp4", "broken.mp4"],
-            capture_output=True, text=True
-        )
+@app.post("/repair")
+async def repair_video(
+    background_tasks: BackgroundTasks,
+    healthy: UploadFile = File(...),
+    broken: UploadFile = File(...)
+):
+    job_id = str(uuid.uuid4())
+    work_dir = Path(f"/tmp/{job_id}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    
+    h_path = work_dir / "healthy.mp4"
+    b_path = work_dir / "broken.mp4"
+    
+    with h_path.open("wb") as f:
+        shutil.copyfileobj(healthy.file, f)
+    with b_path.open("wb") as f:
+        shutil.copyfileobj(broken.file, f)
         
-        # Untrunc creates a file named "broken.mp4_fixed.mp4"
-        fixed_filename = "broken.mp4_fixed.mp4"
-        
-        if os.path.exists(fixed_filename):
-            return FileResponse(fixed_filename, media_type="video/mp4", filename="fixed_video.mp4")
-        else:
-            return {"error": "Repair failed", "details": result.stderr}
-            
-    finally:
-        # Cleanup (optional: keep if you want to debug)
-        for f in ["working.mp4", "broken.mp4"]:
-            if os.path.exists(f): os.remove(f)
+    process = subprocess.run(
+        ["untrunc", "healthy.mp4", "broken.mp4"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True
+    )
+    
+    fixed_files = list(work_dir.glob("*_fixed*"))
+    if not fixed_files:
+        cleanup(work_dir)
+        raise HTTPException(status_code=500, detail=f"Repair failed: {process.stderr}")
+
+    background_tasks.add_task(cleanup, work_dir)
+    return FileResponse(fixed_files[0], filename=f"fixed_{broken.filename}")
